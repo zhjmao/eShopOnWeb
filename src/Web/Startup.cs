@@ -1,6 +1,11 @@
 ﻿using Ardalis.ListStartupServices;
-using MediatR;
+using BlazorAdmin;
+using BlazorAdmin.Services;
+using Blazored.LocalStorage;
+using BlazorShared;
+using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
@@ -8,21 +13,18 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.ApplicationModels;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.eShopWeb.ApplicationCore.Interfaces;
-using Microsoft.eShopWeb.ApplicationCore.Services;
 using Microsoft.eShopWeb.Infrastructure.Data;
 using Microsoft.eShopWeb.Infrastructure.Identity;
-using Microsoft.eShopWeb.Infrastructure.Logging;
-using Microsoft.eShopWeb.Infrastructure.Services;
-using Microsoft.eShopWeb.Web.Interfaces;
-using Microsoft.eShopWeb.Web.Services;
+using Microsoft.eShopWeb.Web.Configuration;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
-using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Net.Mime;
 
 namespace Microsoft.eShopWeb.Web
@@ -30,6 +32,7 @@ namespace Microsoft.eShopWeb.Web
     public class Startup
     {
         private IServiceCollection _services;
+
         public Startup(IConfiguration configuration)
         {
             Configuration = configuration;
@@ -44,6 +47,15 @@ namespace Microsoft.eShopWeb.Web
 
             // use real database
             //ConfigureProductionServices(services);
+        }
+
+        public void ConfigureDockerServices(IServiceCollection services)
+        {
+            services.AddDataProtection()
+                .SetApplicationName("eshopwebmvc")
+                .PersistKeysToFileSystem(new DirectoryInfo(@"./"));
+
+            ConfigureDevelopmentServices(services);
         }
 
         private void ConfigureInMemoryDatabases(IServiceCollection services)
@@ -74,58 +86,57 @@ namespace Microsoft.eShopWeb.Web
             ConfigureServices(services);
         }
 
+        public void ConfigureTestingServices(IServiceCollection services)
+        {
+            ConfigureInMemoryDatabases(services);
+        }
 
 
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
-            ConfigureCookieSettings(services);
+            services.AddCookieSettings();
 
-            CreateIdentityIfNotCreated(services);
 
-            services.AddMediatR(typeof(BasketViewModelService).Assembly);
+            services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+                .AddCookie(options =>
+                {
+                    options.Cookie.HttpOnly = true;
+                    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                    options.Cookie.SameSite = SameSiteMode.Lax;
+                });
 
-            services.AddScoped(typeof(IAsyncRepository<>), typeof(EfRepository<>));
-            services.AddScoped<ICatalogViewModelService, CachedCatalogViewModelService>();
-            services.AddScoped<IBasketService, BasketService>();
-            services.AddScoped<IBasketViewModelService, BasketViewModelService>();
-            services.AddScoped<IOrderService, OrderService>();
-            services.AddScoped<IOrderRepository, OrderRepository>();
-            services.AddScoped<CatalogViewModelService>();
-            services.Configure<CatalogSettings>(Configuration);
-            services.AddSingleton<IUriComposer>(new UriComposer(Configuration.Get<CatalogSettings>()));
-            services.AddScoped(typeof(IAppLogger<>), typeof(LoggerAdapter<>));
-            services.AddTransient<IEmailSender, EmailSender>();
+            services.AddIdentity<ApplicationUser, IdentityRole>()
+                       .AddDefaultUI()
+                       .AddEntityFrameworkStores<AppIdentityDbContext>()
+                                       .AddDefaultTokenProviders();
+
+            services.AddScoped<ITokenClaimsService, IdentityTokenClaimService>();
+
+            services.AddCoreServices(Configuration);
+            services.AddWebServices(Configuration);
 
             // Add memory cache services
             services.AddMemoryCache();
-
             services.AddRouting(options =>
             {
                 // Replace the type and the name used to refer to it with your own
                 // IOutboundParameterTransformer implementation
                 options.ConstraintMap["slugify"] = typeof(SlugifyParameterTransformer);
             });
-
             services.AddMvc(options =>
             {
                 options.Conventions.Add(new RouteTokenTransformerConvention(
                          new SlugifyParameterTransformer()));
 
-            });    
+            });
+            services.AddControllersWithViews();
             services.AddRazorPages(options =>
             {
                 options.Conventions.AuthorizePage("/Basket/Checkout");
             });
-            services.AddControllersWithViews();
-            services.AddControllers();
-
             services.AddHttpContextAccessor();
-            
-            services.AddSwaggerGen(c => c.SwaggerDoc("v1", new OpenApi.Models.OpenApiInfo { Title = "My API", Version = "v1"}));
-
             services.AddHealthChecks();
-
             services.Configure<ServiceConfig>(config =>
             {
                 config.Services = new List<ServiceDescriptor>(services);
@@ -133,46 +144,28 @@ namespace Microsoft.eShopWeb.Web
                 config.Path = "/allservices";
             });
 
+            
+            var baseUrlConfig = new BaseUrlConfiguration();
+            Configuration.Bind(BaseUrlConfiguration.CONFIG_NAME, baseUrlConfig);
+            services.AddScoped<BaseUrlConfiguration>(sp => baseUrlConfig);
+            // Blazor Admin Required Services for Prerendering
+            services.AddScoped<HttpClient>(s => new HttpClient
+            {
+                BaseAddress = new Uri(baseUrlConfig.WebBase)
+            });
+
+            // add blazor services
+            services.AddBlazoredLocalStorage();
+            services.AddServerSideBlazor();
+
+            services.AddScoped<HttpService>();
+            services.AddBlazorServices();
+
+            services.AddDatabaseDeveloperPageExceptionFilter();
+
             _services = services; // used to debug registered services
         }
 
-        private static void CreateIdentityIfNotCreated(IServiceCollection services)
-        {
-            var sp = services.BuildServiceProvider();
-            using (var scope = sp.CreateScope())
-            {
-                var existingUserManager = scope.ServiceProvider
-                    .GetService<UserManager<ApplicationUser>>();
-                if(existingUserManager == null)
-                {
-                    services.AddIdentity<ApplicationUser, IdentityRole>()
-                        .AddDefaultUI()
-                        .AddEntityFrameworkStores<AppIdentityDbContext>()
-                                        .AddDefaultTokenProviders();
-                }
-            }
-        }
-
-        private static void ConfigureCookieSettings(IServiceCollection services)
-        {
-            services.Configure<CookiePolicyOptions>(options =>
-            {
-                // This lambda determines whether user consent for non-essential cookies is needed for a given request.
-                options.CheckConsentNeeded = context => true;
-                options.MinimumSameSitePolicy = SameSiteMode.None;
-            });
-            services.ConfigureApplicationCookie(options =>
-            {
-                options.Cookie.HttpOnly = true;
-                options.ExpireTimeSpan = TimeSpan.FromHours(1);
-                options.LoginPath = "/Account/Login";
-                options.LogoutPath = "/Account/Logout";
-                options.Cookie = new CookieBuilder
-                {
-                    IsEssential = true // required for auth to work without explicit user consent; adjust to suit your privacy policy
-                };
-            });
-        }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
         public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
@@ -182,16 +175,15 @@ namespace Microsoft.eShopWeb.Web
                 {
                     ResponseWriter = async (context, report) =>
                     {
-                        var result = JsonConvert.SerializeObject(
-                            new
+                        var result = new
+                        {
+                            status = report.Status.ToString(),
+                            errors = report.Entries.Select(e => new
                             {
-                                status = report.Status.ToString(),
-                                errors = report.Entries.Select(e => new
-                                {
-                                    key = e.Key,
-                                    value = Enum.GetName(typeof(HealthStatus), e.Value.Status)
-                                })
-                            });
+                                key = e.Key,
+                                value = Enum.GetName(typeof(HealthStatus), e.Value.Status)
+                            })
+                        }.ToJson();
                         context.Response.ContentType = MediaTypeNames.Application.Json;
                         await context.Response.WriteAsync(result);
                     }
@@ -199,8 +191,9 @@ namespace Microsoft.eShopWeb.Web
             if (env.IsDevelopment())
             {
                 app.UseDeveloperExceptionPage();
-                app.UseShowAllServicesMiddleware();
-                app.UseDatabaseErrorPage();
+                app.UseShowAllServicesMiddleware();                                
+                app.UseMigrationsEndPoint();
+                app.UseWebAssemblyDebugging();
             }
             else
             {
@@ -209,22 +202,14 @@ namespace Microsoft.eShopWeb.Web
                 app.UseHsts();
             }
 
+            app.UseHttpsRedirection();
+            app.UseBlazorFrameworkFiles();
             app.UseStaticFiles();
             app.UseRouting();
-            
-            app.UseHttpsRedirection();
+
             app.UseCookiePolicy();
             app.UseAuthentication();
             app.UseAuthorization();
-            // Enable middleware to serve generated Swagger as a JSON endpoint.
-            app.UseSwagger();
-
-            // Enable middleware to serve swagger-ui (HTML, JS, CSS, etc.), 
-            // specifying the Swagger JSON endpoint.
-            app.UseSwaggerUI(c =>
-            {
-                c.SwaggerEndpoint("/swagger/v1/swagger.json", "My API V1");
-            });
 
             app.UseEndpoints(endpoints =>
             {
@@ -232,7 +217,11 @@ namespace Microsoft.eShopWeb.Web
                 endpoints.MapRazorPages();
                 endpoints.MapHealthChecks("home_page_health_check");
                 endpoints.MapHealthChecks("api_health_check");
+                //endpoints.MapBlazorHub("/admin");
+                endpoints.MapFallbackToFile("index.html");
             });
         }
+
     }
+
 }

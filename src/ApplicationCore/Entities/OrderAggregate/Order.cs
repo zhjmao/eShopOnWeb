@@ -1,5 +1,5 @@
-﻿using Microsoft.eShopWeb.ApplicationCore.Interfaces;
-using Ardalis.GuardClauses;
+﻿using Ardalis.GuardClauses;
+using Microsoft.eShopWeb.ApplicationCore.Interfaces;
 using System;
 using System.Collections.Generic;
 
@@ -22,8 +22,8 @@ namespace Microsoft.eShopWeb.ApplicationCore.Entities.OrderAggregate
             ShipToAddress = shipToAddress;
             _orderItems = items;
         }
-        public string BuyerId { get; private set; }
 
+        public string BuyerId { get; private set; }
         public DateTimeOffset OrderDate { get; private set; } = DateTimeOffset.Now;
         public Address ShipToAddress { get; private set; }
 
